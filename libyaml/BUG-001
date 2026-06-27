@@ -1,0 +1,214 @@
+# 🛡️ BUG-001 — Null Pointer Dereference in `parser.c` First-Entry Collection Parsing (libyaml)
+
+> **BoxStrike Security Research Archive**
+
+---
+
+## Research Information
+
+| Field              | Value                                               |
+| ------------------ | --------------------------------------------------- |
+| Research ID        | BUG-001                                             |
+| Project            | libyaml                                             |
+| Vulnerability Type | Null Pointer Dereference (CWE-476)                  |
+| Affected File      | `src/parser.c`                                      |
+| Affected Version   | v0.2.6-rc.1 (master branch at the time of research) |
+| Discovery Method   | Manual Source Code Review                           |
+| Disclosure Status  | Reported to the project maintainers                 |
+| Researcher         | Eneshan Erdoğan Karaca                              |
+| Organization       | BoxStrike                                           |
+| Research Date      | June 2026                                           |
+
+---
+
+# Overview
+
+This document summarizes **BUG-002**, a vulnerability identified during a manual security review of the **libyaml** parser implementation.
+
+The issue affects four parser functions responsible for processing YAML collections. In each affected function, the parser calls `PEEK_TOKEN(parser)` during the initial collection-entry path (`first == 1`) and immediately dereferences the returned pointer without verifying that the operation succeeded.
+
+Because `PEEK_TOKEN()` may legitimately return `NULL` when token retrieval fails, the parser may dereference an invalid pointer before normal error handling is reached, resulting in a process crash.
+
+The finding has been responsibly disclosed to the libyaml maintainers.
+
+---
+
+# Affected Components
+
+The same programming pattern appears in four independent parser functions.
+
+| Function                                   | Component             |
+| ------------------------------------------ | --------------------- |
+| `yaml_parser_parse_block_sequence_entry()` | Block Sequence Parser |
+| `yaml_parser_parse_block_mapping_key()`    | Block Mapping Parser  |
+| `yaml_parser_parse_flow_sequence_entry()`  | Flow Sequence Parser  |
+| `yaml_parser_parse_flow_mapping_key()`     | Flow Mapping Parser   |
+
+Although these functions process different YAML structures, they share the same initialization logic and therefore exhibit the same vulnerability.
+
+---
+
+# Technical Background
+
+The parser uses the following macro to obtain the next available token:
+
+```c
+#define PEEK_TOKEN(parser) \
+    ((parser->token_available || yaml_parser_fetch_more_tokens(parser)) ? \
+        parser->tokens.head : NULL)
+```
+
+When token acquisition fails—for example due to malformed input, an I/O failure, or a memory allocation failure—the macro returns `NULL`.
+
+Most parser code correctly validates this return value before accessing the token.
+
+However, the **first-entry branch** inside the affected functions omits this validation.
+
+The vulnerable logic follows this pattern:
+
+```text
+Collection Entry
+        │
+        ▼
+PEEK_TOKEN(parser)
+        │
+        ▼
+NULL returned
+        │
+        ▼
+token->start_mark
+        │
+        ▼
+Null Pointer Dereference
+        │
+        ▼
+Segmentation Fault
+```
+
+---
+
+# Root Cause Analysis
+
+The vulnerability is caused by inconsistent defensive programming.
+
+Throughout `parser.c`, nearly every call to `PEEK_TOKEN()` is immediately followed by a validity check:
+
+```c
+token = PEEK_TOKEN(parser);
+
+if (!token)
+    return 0;
+```
+
+However, the initial `if (first)` branch in the affected functions omits this validation and assumes that a valid token will always be available.
+
+This assumption is incorrect because the parser implementation explicitly allows `PEEK_TOKEN()` to return `NULL`.
+
+Consequently, execution proceeds directly to:
+
+```c
+token->start_mark
+```
+
+without confirming that `token` references a valid object.
+
+---
+
+# Trigger Conditions
+
+The vulnerable code path is executed only when entering a collection for the first time (`first == 1`).
+
+If token acquisition fails during this initial stage, the parser dereferences a null pointer before reaching its standard error handling routines.
+
+Possible failure scenarios include:
+
+* Truncated YAML streams
+* Malformed YAML documents
+* Read handler failures
+* Memory allocation failures
+* Fault injection during parser testing
+* Fuzzing environments
+
+---
+
+# Security Impact
+
+Successful triggering of this issue may lead to:
+
+* Application crash
+* Segmentation fault
+* Null Pointer Dereference
+* Denial-of-Service (DoS)
+* Unexpected parser termination
+
+Based on the available analysis, the vulnerability does **not** directly enable arbitrary code execution or privilege escalation.
+
+Its primary impact is application stability.
+
+---
+
+# Why This Bug Is Interesting
+
+One notable aspect of this finding is that the vulnerable code is immediately followed by a correct implementation.
+
+Later within the same functions, token retrieval is performed safely:
+
+```c
+token = PEEK_TOKEN(parser);
+
+if (!token)
+    return 0;
+```
+
+This indicates that the project already follows the correct defensive pattern almost everywhere.
+
+The vulnerable branch appears to be an overlooked exception rather than a broader architectural issue.
+
+---
+
+# Recommended Fix
+
+The recommended remediation is minimal and consistent with the rest of the parser implementation.
+
+Immediately validate the return value after each `PEEK_TOKEN()` call inside the initial `if (first)` block.
+
+Example:
+
+```c
+token = PEEK_TOKEN(parser);
+
+if (!token)
+    return 0;
+
+if (!PUSH(parser, parser->marks, token->start_mark))
+    return 0;
+```
+
+The same validation should be applied to all four affected parser functions.
+
+---
+
+# Disclosure Timeline
+
+| Date      | Event                                                     |
+| --------- | --------------------------------------------------------- |
+| June 2026 | Vulnerability identified during manual source code review |
+| June 2026 | Report submitted to the libyaml maintainers               |
+| Pending   | Maintainer review                                         |
+| Pending   | Fix / Patch                                               |
+
+---
+
+# References
+
+* Project: **libyaml**
+* Affected Version: **v0.2.6-rc.1**
+* Public Issue: **GitHub Issue #337**
+
+---
+
+# About This Research
+
+This document is part of the **BoxStrike Security Research Archive**, a collection of technical security research covering software vulnerabilities, secure coding practices, malware analysis, and responsible disclosure activities.
+
+The objective of this archive is to document real-world security findings, encourage secure software development, and provide educational resources for the cybersecurity community. All research is conducted under responsible disclosure principles and published only after the relevant findings have been reported to the affected project maintainers.
